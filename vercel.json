@@ -17,12 +17,12 @@
     }
   ],
   "env": {
-    "ATLANTIC_API_KEY": "@atlantic-api-key",
-    "PTERO_URL": "@ptero-url", 
-    "PTERO_DOMAIN": "@ptero-domain",
-    "PLTA": "@plta",
-    "PLTC": "@pltc",
-    "BOT_TOKEN": "@bot-token",
-    "ADMIN_ID": "@admin-id"
+    "ATLANTIC_API_KEY": "dviVP9oF3jnBESvJx3xMbiVwNAISQ13EWCHtASX2z1BnPgZSQ8AhFYQMkhOUGIfzILVAnVdfqUPG13oUASdt2CO567z4KUHSsvfd",
+    "PTERO_URL": "https://api-pteroku.vercel.app",
+    "PTERO_DOMAIN": "http://panelprib.store-panell.my.id",
+    "PLTA": "ptla_gpw0WHvphZHG68ISb6XrMs1vN9GWmjNd3TcCWx5217W",
+    "PLTC": "ptlc_qblwXK9lwSh58dHR7GlU76bf4XCHEc5prVsUVFQy3gD",
+    "BOT_TOKEN": "7504240304:AAFN7EWFS8lSn24yIw6Uz8skliPgfY6uAcY",
+    "ADMIN_ID": "7978512548"
   }
 }
