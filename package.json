@@ -12,6 +12,6 @@
     "qrcode": "^1.5.3"
   },
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   }
 }
