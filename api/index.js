@@ -1,11 +1,26 @@
-const { createOrder, checkPayment } = require('./order');
+const axios = require('axios');
+const qs = require('qs');
+const QRCode = require('qrcode');
+const pendingOrders = new Map();
+
+const config = {
+    atlanticApiKey: process.env.ATLANTIC_API_KEY || 'dviVP9oF3jnBESvJx3xMbiVwNAISQ13EWCHtASX2z1BnPgZSQ8AhFYQMkhOUGIfzILVAnVdfqUPG13oUASdt2CO567z4KUHSsvfd',
+    pteroURL: process.env.PTERO_URL || 'https://api-pteroku.vercel.app',
+    domain: process.env.PTERO_DOMAIN || 'http://panelprib.store-panell.my.id',
+    plta: process.env.PLTA || 'ptla_gpw0WHvphZHG68ISb6XrMs1vN9GWmjNd3TcCWx5217W',
+    pltc: process.env.PLTC || 'ptlc_qblwXK9lwSh58dHR7GlU76bf4XCHEc5prVsUVFQy3gD',
+    botToken: process.env.BOT_TOKEN || '7504240304:AAFN7EWFS8lSn24yIw6Uz8skliPgfY6uAcY',
+    adminId: process.env.ADMIN_ID || '7978512548'
+};
 
 module.exports = async (req, res) => {
+  // Set CORS headers
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
+  // Handle preflight
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -28,6 +43,169 @@ module.exports = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+async function createOrder(req, res) {
+    try {
+        const { type, username, telegramId, price } = req.body;
+        const orderId = `ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+        const payload = qs.stringify({
+            api_key: config.atlanticApiKey,
+            reff_id: orderId,
+            nominal: price,
+            type: 'ewallet',
+            metode: 'qris'
+        });
+
+        const atlanticResponse = await axios.post(
+            'https://atlantich2h.com/deposit/create',
+            payload,
+            { 
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 30000
+            }
+        );
+
+        if (!atlanticResponse.data.status) {
+            return res.json({ success: false, error: atlanticResponse.data.message });
+        }
+
+        const atlanticData = atlanticResponse.data.data;
+        
+        const qrBuffer = await QRCode.toBuffer(atlanticData.qr_string, {
+            type: 'png',
+            width: 300,
+            margin: 1
+        });
+
+        const qrBase64 = qrBuffer.toString('base64');
+        const qrUrl = `data:image/png;base64,${qrBase64}`;
+
+        pendingOrders.set(orderId, {
+            type,
+            username,
+            telegramId,
+            price,
+            atlanticId: atlanticData.id,
+            status: 'pending',
+            createdAt: Date.now()
+        });
+
+        cleanupExpiredOrders();
+
+        res.json({
+            success: true,
+            orderId: orderId,
+            qrUrl: qrUrl
+        });
+
+    } catch (error) {
+        console.error('Create order error:', error);
+        res.json({ success: false, error: error.message });
+    }
+}
+
+async function checkPayment(req, res) {
+    try {
+        const { orderId } = req.query;
+        const order = pendingOrders.get(orderId);
+
+        if (!order) {
+            return res.json({ success: false, error: 'Order tidak ditemukan' });
+        }
+
+        const payload = qs.stringify({
+            api_key: config.atlanticApiKey,
+            id: order.atlanticId
+        });
+
+        const statusResponse = await axios.post(
+            'https://atlantich2h.com/deposit/status',
+            payload,
+            { 
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 15000
+            }
+        );
+
+        if (statusResponse.data.status && statusResponse.data.data.status === 'success') {
+            if (order.type === 'panel') {
+                const panelData = {
+                    username: order.username,
+                    email: `${order.username}@${order.username}.com`,
+                    ram: 0,  
+                    disk: 0,
+                    cpu: 0
+                };
+
+                const pteroResponse = await axios.post(`${config.pteroURL}/create`, panelData, {
+                    params: {
+                        domain: config.domain,
+                        plta: config.plta,
+                        pltc: config.pltc
+                    },
+                    timeout: 30000
+                });
+
+                if (pteroResponse.data.error) {
+                    return res.json({ success: false, error: pteroResponse.data.error });
+                }
+
+                const panelResult = pteroResponse.data;
+                
+                order.status = 'completed';
+                pendingOrders.set(orderId, order);
+
+                res.json({
+                    success: true,
+                    paid: true,
+                    accountInfo: {
+                        username: panelResult.username,
+                        password: panelResult.password,
+                        panelUrl: panelResult.panel_url || config.domain,
+                        serverId: panelResult.server_id
+                    }
+                });
+
+            } else if (order.type === 'reseller') {
+                try {
+                    await axios.post(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                        chat_id: config.adminId,
+                        text: `Reseller Baru\n\nID: ${order.telegramId}\nOrder: ${orderId}\nHarga: Rp ${order.price.toLocaleString('id-ID')}\n\nAdd user ${order.telegramId} ke premium.`
+                    }, { timeout: 10000 });
+                } catch (tgError) {
+                    console.error('Telegram notification error:', tgError);
+                }
+
+                order.status = 'completed';
+                pendingOrders.set(orderId, order);
+
+                res.json({
+                    success: true,
+                    paid: true
+                });
+            }
+        } else {
+            res.json({
+                success: true,
+                paid: false
+            });
+        }
+
+    } catch (error) {
+        console.error('Check payment error:', error);
+        res.json({ success: false, error: error.message });
+    }
+}
+
+function cleanupExpiredOrders() {
+    const now = Date.now();
+    for (const [orderId, order] of pendingOrders.entries()) {
+        if (now - order.createdAt > 600000) { 
+            pendingOrders.delete(orderId);
+        }
+    }
+}
 
 function serveHTML(res) {
   const html = `
@@ -261,7 +439,6 @@ function serveHTML(res) {
         <h1>Pterodactyl Store</h1>
         <p class="subtitle">Panel Hosting Terbaik</p>
 
-        <!-- Package Selection -->
         <div id="packageSelection">
             <div class="package" data-type="panel" onclick="selectPackage('panel')">
                 <h3>Panel Unlimited</h3>
@@ -276,7 +453,6 @@ function serveHTML(res) {
             </div>
         </div>
 
-        <!-- Username Form -->
         <div id="usernameForm" class="form">
             <div class="input-group">
                 <label for="username">Username</label>
@@ -285,7 +461,6 @@ function serveHTML(res) {
             <button class="btn" onclick="processOrder()">Beli Sekarang</button>
         </div>
 
-        <!-- Reseller Form -->
         <div id="resellerForm" class="form">
             <div class="input-group">
                 <label for="telegramId">ID Telegram</label>
@@ -294,13 +469,11 @@ function serveHTML(res) {
             <button class="btn" onclick="processReseller()">Beli Reseller</button>
         </div>
 
-        <!-- Loading -->
         <div id="loading" class="loading">
             <div class="spinner"></div>
             <p>Memproses pembayaran...</p>
         </div>
 
-        <!-- QR Code -->
         <div id="qrContainer" class="qr-container">
             <h3>Scan QR Code</h3>
             <p>Scan QR code berikut untuk pembayaran</p>
@@ -309,7 +482,6 @@ function serveHTML(res) {
             <button class="btn" onclick="checkPayment()" id="checkBtn">Cek Status Pembayaran</button>
         </div>
 
-        <!-- Account Info -->
         <div id="accountInfo" class="account-info">
             <h3>Panel Berhasil Dibuat!</h3>
             <div class="info-item"><strong>Username:</strong> <span id="infoUsername"></span></div>
@@ -488,4 +660,4 @@ function serveHTML(res) {
 
   res.setHeader('Content-Type', 'text/html');
   res.status(200).send(html);
-}
+                }
