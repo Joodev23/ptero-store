@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.js"
+    }
+  ],
+  "env": {
+    "ATLANTIC_API_KEY": "@atlantic-api-key",
+    "PTERO_URL": "@ptero-url", 
+    "PTERO_DOMAIN": "@ptero-domain",
+    "PLTA": "@plta",
+    "PLTC": "@pltc",
+    "BOT_TOKEN": "@bot-token",
+    "ADMIN_ID": "@admin-id"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "pterodactyl-store",
+  "version": "1.0.0",
+  "description": "Pterodactyl Store",
+  "main": "api/index.js",
+  "scripts": {
+    "dev": "node api/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "qs": "^6.11.0",
+    "qrcode": "^1.5.3"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
