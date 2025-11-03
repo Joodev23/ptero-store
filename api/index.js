@@ -20,7 +20,6 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -49,6 +48,8 @@ async function createOrder(req, res) {
         const { type, username, telegramId, price } = req.body;
         const orderId = `ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
+        console.log('Creating order:', { type, username, telegramId, price, orderId });
+
         const payload = qs.stringify({
             api_key: config.atlanticApiKey,
             reff_id: orderId,
@@ -57,22 +58,43 @@ async function createOrder(req, res) {
             metode: 'qris'
         });
 
+        console.log('Atlantic payload:', payload);
+
         const atlanticResponse = await axios.post(
             'https://atlantich2h.com/deposit/create',
             payload,
             { 
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: { 
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
                 timeout: 30000
             }
         );
 
+        console.log('Atlantic response status:', atlanticResponse.status);
+        console.log('Atlantic response data:', JSON.stringify(atlanticResponse.data, null, 2));
+
         if (!atlanticResponse.data.status) {
-            return res.json({ success: false, error: atlanticResponse.data.message });
+            return res.json({ 
+                success: false, 
+                error: atlanticResponse.data.message || 'Gagal buat QRIS',
+                details: atlanticResponse.data
+            });
         }
 
         const atlanticData = atlanticResponse.data.data;
         
-        const qrBuffer = await QRCode.toBuffer(atlanticData.qr_string, {
+        // Cek field yang tersedia untuk QR string
+        let qrString = atlanticData.qr_string || atlanticData.qr_code || atlanticData.qr;
+        
+        if (!qrString) {
+            console.log('No QR string found, available fields:', Object.keys(atlanticData));
+            // Fallback: generate dari order ID
+            qrString = orderId;
+        }
+
+        const qrBuffer = await QRCode.toBuffer(qrString, {
             type: 'png',
             width: 300,
             margin: 1
@@ -88,7 +110,8 @@ async function createOrder(req, res) {
             price,
             atlanticId: atlanticData.id,
             status: 'pending',
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            qrString: qrString
         });
 
         cleanupExpiredOrders();
@@ -96,12 +119,20 @@ async function createOrder(req, res) {
         res.json({
             success: true,
             orderId: orderId,
-            qrUrl: qrUrl
+            qrUrl: qrUrl,
+            debug: {
+                atlanticId: atlanticData.id,
+                qrString: qrString.substring(0, 50) + '...'
+            }
         });
 
     } catch (error) {
-        console.error('Create order error:', error);
-        res.json({ success: false, error: error.message });
+        console.error('Create order error:', error.response?.data || error.message);
+        res.json({ 
+            success: false, 
+            error: error.response?.data?.message || error.message,
+            details: error.response?.data
+        });
     }
 }
 
@@ -114,6 +145,8 @@ async function checkPayment(req, res) {
             return res.json({ success: false, error: 'Order tidak ditemukan' });
         }
 
+        console.log('Checking payment for order:', orderId);
+
         const payload = qs.stringify({
             api_key: config.atlanticApiKey,
             id: order.atlanticId
@@ -123,10 +156,15 @@ async function checkPayment(req, res) {
             'https://atlantich2h.com/deposit/status',
             payload,
             { 
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: { 
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
                 timeout: 15000
             }
         );
+
+        console.log('Payment check response:', JSON.stringify(statusResponse.data, null, 2));
 
         if (statusResponse.data.status && statusResponse.data.data.status === 'success') {
             if (order.type === 'panel') {
@@ -138,6 +176,8 @@ async function checkPayment(req, res) {
                     cpu: 0
                 };
 
+                console.log('Creating panel with data:', panelData);
+
                 const pteroResponse = await axios.post(`${config.pteroURL}/create`, panelData, {
                     params: {
                         domain: config.domain,
@@ -147,8 +187,14 @@ async function checkPayment(req, res) {
                     timeout: 30000
                 });
 
+                console.log('Ptero response:', JSON.stringify(pteroResponse.data, null, 2));
+
                 if (pteroResponse.data.error) {
-                    return res.json({ success: false, error: pteroResponse.data.error });
+                    return res.json({ 
+                        success: false, 
+                        error: pteroResponse.data.error,
+                        pteroResponse: pteroResponse.data
+                    });
                 }
 
                 const panelResult = pteroResponse.data;
@@ -188,13 +234,18 @@ async function checkPayment(req, res) {
         } else {
             res.json({
                 success: true,
-                paid: false
+                paid: false,
+                status: statusResponse.data.data?.status || 'pending'
             });
         }
 
     } catch (error) {
-        console.error('Check payment error:', error);
-        res.json({ success: false, error: error.message });
+        console.error('Check payment error:', error.response?.data || error.message);
+        res.json({ 
+            success: false, 
+            error: error.response?.data?.message || error.message,
+            details: error.response?.data
+        });
     }
 }
 
@@ -202,11 +253,13 @@ function cleanupExpiredOrders() {
     const now = Date.now();
     for (const [orderId, order] of pendingOrders.entries()) {
         if (now - order.createdAt > 600000) { 
+            console.log('Cleaning up expired order:', orderId);
             pendingOrders.delete(orderId);
         }
     }
 }
 
+// HTML tetap sama seperti sebelumnya...
 function serveHTML(res) {
   const html = `
 <!DOCTYPE html>
@@ -428,6 +481,17 @@ function serveHTML(res) {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        .debug-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 10px;
+            padding: 10px;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #856404;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -480,6 +544,7 @@ function serveHTML(res) {
             <div class="qr-code" id="qrCode"></div>
             <p style="color: #666; font-size: 12px; margin-top: 10px;">Batas waktu: 10 menit</p>
             <button class="btn" onclick="checkPayment()" id="checkBtn">Cek Status Pembayaran</button>
+            <div class="debug-info" id="debugInfo"></div>
         </div>
 
         <div id="accountInfo" class="account-info">
@@ -548,8 +613,12 @@ function serveHTML(res) {
                 if (data.success) {
                     currentOrderId = data.orderId;
                     showQRCode(data.qrUrl);
+                    if (data.debug) {
+                        document.getElementById('debugInfo').innerHTML = 'Order ID: ' + data.orderId + '<br>Atlantic ID: ' + data.debug.atlanticId;
+                        document.getElementById('debugInfo').style.display = 'block';
+                    }
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Error: ' + data.error + (data.details ? '\n' + JSON.stringify(data.details) : ''));
                     location.reload();
                 }
             } catch (error) {
@@ -589,8 +658,12 @@ function serveHTML(res) {
                 if (data.success) {
                     currentOrderId = data.orderId;
                     showQRCode(data.qrUrl);
+                    if (data.debug) {
+                        document.getElementById('debugInfo').innerHTML = 'Order ID: ' + data.orderId + '<br>Atlantic ID: ' + data.debug.atlanticId;
+                        document.getElementById('debugInfo').style.display = 'block';
+                    }
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Error: ' + data.error + (data.details ? '\n' + JSON.stringify(data.details) : ''));
                     location.reload();
                 }
             } catch (error) {
@@ -626,10 +699,10 @@ function serveHTML(res) {
                             location.reload();
                         }
                     } else {
-                        alert('Pembayaran belum diterima');
+                        alert('Pembayaran belum diterima. Status: ' + (data.status || 'pending'));
                     }
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Error: ' + data.error + (data.details ? '\n' + JSON.stringify(data.details) : ''));
                 }
             } catch (error) {
                 alert('Terjadi error: ' + error.message);
@@ -660,4 +733,4 @@ function serveHTML(res) {
 
   res.setHeader('Content-Type', 'text/html');
   res.status(200).send(html);
-                }
+}
